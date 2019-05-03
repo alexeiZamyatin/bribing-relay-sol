@@ -1,4 +1,3 @@
-# Bribing BTC Relay
 
 
 The block header data used for testing was first provided in the BTCRelay Serpent implementation (<a href="https://github.com/ethereum/btcrelay">repo</a>).  
