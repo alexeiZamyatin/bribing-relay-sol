@@ -1,4 +1,4 @@
-const BTCRelay = artifacts.require("./BTCRelay.sol")
+const BribeRelay = artifacts.require("./BribeRelay.sol")
 const Utils = artifacts.require("./Utils.sol")
 
 const constants = require("./constants")
@@ -10,17 +10,17 @@ var eventFired = helpers.eventFired;
 var dblSha256Flip = helpers.dblSha256Flip
 var flipBytes = helpers.flipBytes
 
-contract('BTCRelay storeHeader', async(accounts) => {
+contract('BribeRelay Eval', async(accounts) => {
 
 
 
     const submitter = accounts[0];
 
     // gas limit
-    const gas_limit = 8000000;
+    const gas_limit = 800000000;
 
     const deploy = async function(){
-        relay = await BTCRelay.new();
+        relay = await BribeRelay.new();
         utils = await Utils.deployed();
     }
 
@@ -63,25 +63,14 @@ contract('BTCRelay storeHeader', async(accounts) => {
         console.log("Gas used: " + submitHeaderTx.receipt.gasUsed)
     });
     
-    it("set duplicate initial parent - should fail", async () => {   
-        storeGenesis();
 
-        await truffleAssert.reverts(
-            relay.setInitialParent(
-                constants.GENESIS.HEADER,
-                constants.GENESIS.BLOCKHEIGHT,
-                constants.GENESIS.CHAINWORK,
-                constants.GENESIS.LAST_DIFFICULTY_ADJUSTMENT_TIME
-                ),
-                constants.ERROR_CODES.ERR_GENESIS_SET
-            );
-    });
-
-    it("submit 1 block after initial Genesis parent ", async () => {   
+    it("EVAL CASE 1: verify block header ", async () => {   
         
         storeGenesis();
-        let submitBlock1 = await relay.submitMainChainHeader(
-            constants.HEADERS.BLOCK_1
+        let submitBlock1 = await relay.submitBlockHeader(
+            constants.HEADERS.BLOCK_1, 
+            "0xC5a96Db085dDA36FfBE390f455315D30D6D3DC52", // random address
+            false
         );
         truffleAssert.eventEmitted(submitBlock1, 'StoreHeader', (ev) => {
             return ev.blockHeight == 1;
@@ -90,69 +79,19 @@ contract('BTCRelay storeHeader', async(accounts) => {
         console.log("Total gas used: " + submitBlock1.receipt.gasUsed);
    });
 
-   it("submit genesis, skips block 1, submits block 2 - should fail", async () => {   
+   it("EVAL CASE 2: verify block AND store header ", async () => {   
         
-    storeGenesis();       
-    await truffleAssert.reverts(
-        relay.submitMainChainHeader(
-            constants.HEADERS.BLOCK_2
-            ),
-            constants.ERROR_CODES.ERR_PREV_BLOCK
-        );
+    storeGenesis();
+    let submitBlock1 = await relay.submitBlockHeader(
+        constants.HEADERS.BLOCK_1, 
+        "0xC5a96Db085dDA36FfBE390f455315D30D6D3DC52", // random address
+        true
+    );
+    truffleAssert.eventEmitted(submitBlock1, 'StoreHeader', (ev) => {
+        return ev.blockHeight == 1;
     });
 
-    it("submit block 1 with invalid pow - should fail", async () => {   
-        
-        storeGenesis();     
-        await truffleAssert.reverts(
-            relay.submitMainChainHeader(
-                constants.HEADERS.BLOCK_1_INVALID_POW
-                ),
-                constants.ERROR_CODES.ERR_LOW_DIFF
-            );
-    });
-
-    it("submit duplicate block header (block 1) - should fail", async () => {   
-    
-        storeGenesis();    
-        let submitBlock1 = await relay.submitMainChainHeader(
-            constants.HEADERS.BLOCK_1
-        );
-        truffleAssert.eventEmitted(submitBlock1, 'StoreHeader', (ev) => {
-            return ev.blockHeight == 1;
-        });   
-        await truffleAssert.reverts(
-            relay.submitMainChainHeader(
-                constants.HEADERS.BLOCK_1
-                ),
-                constants.ERROR_CODES.ERR_DUPLICATE_BLOCK
-            );
-    });
-
-    it("submit main chain block as fork - should fail", async () => {   
-    
-        storeGenesis();    
-        let submitBlock1 = await relay.submitMainChainHeader(
-            constants.HEADERS.BLOCK_1
-        );
-        truffleAssert.eventEmitted(submitBlock1, 'StoreHeader', (ev) => {
-            return ev.blockHeight == 1;
-        });   
-        //TODO: need correct fork data
-    });
-        
-    it("submit 1 diff. adjust block after initial Genesis parent ", async () => {   
-        
-        storeGenesis();      
-
-        let submitBlock1 = await relay.submitMainChainHeader(
-            constants.HEADERS.BLOCK_1
-        );
-        truffleAssert.eventEmitted(submitBlock1, 'StoreHeader', (ev) => {
-            return ev.blockHeight == 2016;
-        });
-
-        console.log("Total gas used: " + submitBlock1.receipt.gasUsed);
-   });
+    console.log("Total gas used: " + submitBlock1.receipt.gasUsed);
+});
 
 })

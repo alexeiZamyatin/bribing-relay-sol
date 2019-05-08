@@ -7,7 +7,5 @@ import "./Utils.sol";
 /// @title Bitcoin block header storage contract
 /// @notice Stores Bitcoin block headers for the *main chain* (no forks!)
 contract BTCHeaderStore {
-
     
-
 }

@@ -5,14 +5,14 @@ import 'openzeppelin-solidity/contracts/ownership/Ownable.sol';
 import "./Utils.sol";
 
 /// @notice Contract is Ownable - provides isOwner modifier and necessary constructor
-contract TXOrdering is Ownable{
+contract BribeRelay is Ownable{
     
     using SafeMath for uint256;
     using Utils for bytes;
 
 
     struct HeaderInfo {
-        uint256 blockHash; // height of this block header
+        bytes32 blockHash; // height of this block header
         uint256 chainWork; // accumulated PoW at this height
         bytes header; // 80 bytes block header
         uint256 lastDiffAdjustment; // necessary to track, should a fork include a diff. adjustment block
@@ -26,6 +26,7 @@ contract TXOrdering is Ownable{
     uint256 public _exchangeRate; // BTC-ETH exchange rate, necessary for computing payouts (fixed exchange rate for simplicity!)
     uint256 public _bribe; // bribe value
     uint256 public _totalFunding; // total funding currently in contract
+    uint256 public _attackDuration; // target attack duration. Note: actual duration depends on available funding!
 
     // Templates - stored as bytes. Miners can parse locally. Optional: provide 'view' parsing functions in contract.
     mapping(uint256 => bytes) public _headerTemplates; // mapping of height to 80 bytes block template. Empty fields: nonce, merkle tree root(?)
@@ -47,7 +48,7 @@ contract TXOrdering is Ownable{
     uint256 public constant UNROUNDED_MAX_TARGET = 2**224 - 1; 
     uint256 public constant TARGET_TIMESPAN_DIV_4 = TARGET_TIMESPAN / 4; // store division as constant to save costs
     uint256 public constant TARGET_TIMESPAN_MUL_4 = TARGET_TIMESPAN * 4; // store multiplucation as constant to save costs
-    uint256 public constant BLOCK_REWARD = 12.5; // Bitcoin block reward    
+    uint256 public constant BLOCK_REWARD = 12; //.5; // Bitcoin block reward    
 
 
     // EXCEPTION MESSAGES
@@ -79,7 +80,8 @@ contract TXOrdering is Ownable{
         uint256 chainWork,
         uint256 lastDiffAdjustmentTime,
         uint256 attackDuration,
-        uint256 bribe) 
+        uint256 bribe,
+        uint256 exchangeRate) 
         public 
         payable
         onlyOwner 
@@ -92,12 +94,13 @@ contract TXOrdering is Ownable{
         _lastDiffAdjustmentTime = lastDiffAdjustmentTime;
         
         _attackHeaders[blockHeight].header = blockHeaderBytes;
-        _attackHeaders[blockHeight].blockHeight = blockHeight;
+        _attackHeaders[blockHeight].blockHash = blockHeaderHash;
         _attackHeaders[blockHeight].chainWork = chainWork;
 
         _attackDuration = attackDuration;
         _attackHeight = blockHeight;
         _bribe = bribe;
+        _exchangeRate = exchangeRate;
     }
 
     function submitBlockTemplate(
@@ -116,15 +119,10 @@ contract TXOrdering is Ownable{
         _totalFunding += msg.value; // TODO: double check if conversion neccessary here
     }
 
-    /*
-    * TODO: remove unnecessary checks. Add checks for block and coinbase template!
-    * 
-    * @notice Parses, validates and stores Bitcoin block header to mapping
-    * @param blockHeaderBytes Raw Bitcoin block header bytes (80 bytes) 
-    * @param attackHeight Height of attack template list, for which this block is submitted
-    * @param payoutAccount Account which should receive payouts for attack participation 
-    */  
-    function submitBlockHeader(bytes memory blockHeaderBytes, uint256 attackHeight, address payoutAccount) public returns (bytes32) {
+    // EVAL CASE: 
+    // 1) Parse block and verify block header (not full format)
+    // 2) Store block header
+    function submitBlockHeader(bytes memory blockHeaderBytes, uint256 blockHeight, address payable payoutAccount, bool store) public returns (bytes32) {
         
         require(blockHeaderBytes.length == 80, ERR_INVALID_HEADER_SIZE);
 
@@ -133,21 +131,20 @@ contract TXOrdering is Ownable{
 
         // Fail if block already exists
         // Time is always set in block header struct (prevBlockHash and height can be 0 for Genesis block)
-        require(_attackHeaders[attackHeight-1].blockHash.length <= 0, ERR_DUPLICATE_BLOCK);
+        require(_attackHeaders[blockHeight-1].blockHash.length <= 0, ERR_DUPLICATE_BLOCK);
         // Fail if previous block hash not in current state of main chain
-        require(_attackHeaders[attackHeight-1].blockHash == hashPrevBlock, ERR_PREV_BLOCK);
+        require(_attackHeaders[blockHeight-1].blockHash == hashPrevBlock, ERR_PREV_BLOCK);
 
         // Fails if previous block header is not stored
-        uint256 chainWorkPrevBlock = _attackHeaders[attackHeight-1].chainWork;
+        uint256 chainWorkPrevBlock = _attackHeaders[blockHeight-1].chainWork;
         uint256 target = getTargetFromHeader(blockHeaderBytes);
-        uint256 blockHeight = 1 + _attackHeaders[attackHeight-1].blockHeight;
         
         // Check the PoW solution matches the target specified in the block header
         require(hashCurrentBlock <= bytes32(target), ERR_LOW_DIFF);
         // Check the specified difficulty target is correct:
         // If retarget: according to Bitcoin's difficulty adjustment mechanism;
         // Else: same as last block. 
-        require(correctDifficultyTarget(hashPrevBlock, blockHeight, target), ERR_DIFF_TARGET_HEADER);
+        require(correctDifficultyTarget(blockHeight, target), ERR_DIFF_TARGET_HEADER);
 
         // https://en.bitcoin.it/wiki/Difficulty
         // TODO: check correct conversion here
@@ -166,28 +163,73 @@ contract TXOrdering is Ownable{
 
         // DO WE NEED THIS? If we pay the first possible submission, we don't need to store the blocks, once we have validated them 
         // --> only store hash to save gas.
-        storeBlockHeader(hashCurrentBlock, blockHeaderBytes, blockHeight, chainWork, payoutAccount);
+        if(store){
+            storeBlockHeader(hashCurrentBlock, blockHeaderBytes, blockHeight, chainWork, payoutAccount);
+        }
     }
+
+    // EVAL CASE 3) Verify transaction inclusion
+    function verifxTX(bytes32 txid, uint256 txBlockHeight, uint256 txIndex, bytes memory merkleProof, uint256 confirmations) public returns(bool) {
+        // txid must not be 0
+        require(txid != bytes32(0x0), ERR_INVALID_TXID);
+        
+        // check requrested confirmations. No need to compute proof if insufficient confs.
+        require(_attackHeight - txBlockHeight >= confirmations, ERR_CONFIRMS);
+
+        bytes32 merkleRoot = getMerkleRoot(_attackHeaders[txBlockHeight].header);
+        // Check merkle proof structure: 1st hash == txid and last hash == merkleRoot
+        require(merkleProof.slice(0, 32).toBytes32() == txid, ERR_MERKLE_PROOF);
+        require(merkleProof.slice(merkleRoot.length, 32).toBytes32() == merkleRoot, ERR_MERKLE_PROOF);
+        
+        // compute merkle tree root and check if it matches block's original merkle tree root
+        if(computeMerkle(txid, txIndex, merkleProof) == merkleRoot){
+            return true;
+        }
+        return false;
+    }
+
+    // EVAL CASE 4) Parse TX
+    function parseTX(bytes memory txData) public returns(bool){
+        extractNumOutputs(txData);
+        extractNumInputs(txData);
+
+        // bytes memory input = extractInputAtIndex(txData, 0);
+        extractOutputAtIndex(txData, 0);
+
+        extractOpReturnData(txData);
+        return true;
+    }
+
 
     /*
     * NOTE: MAYBE WE DON'T NEED TO STORE FULL BLOCK HEADERS - SAVES GAS!
     * @notice Stores parsed block header and meta information
     */
-    function storeBlockHeader(bytes32 hashCurrentBlock, bytes memory blockHeaderBytes, uint256 blockHeight, uint256 chainWork, address payoutAccount) internal {
+    function storeBlockHeader(bytes32 hashCurrentBlock, bytes memory blockHeaderBytes, uint256 blockHeight, uint256 chainWork, address payable payoutAccount) internal {
         // potentially externalize this call
         _attackHeaders[blockHeight].header = blockHeaderBytes;
-        _attackHeaders[blockHeight].blockHeight = blockHeight;
+        _attackHeaders[blockHeight].blockHash = hashCurrentBlock;
         _attackHeaders[blockHeight].chainWork = chainWork;
         _attackHeaders[blockHeight].miner = payoutAccount;
     }
 
+
+    function checkHeaderTemplate(bytes memory blockHeaderBytes, uint256 blockHeight) internal view {
+        // version, cd im 
+        //assert(_headerTemplates[blockHeight].slice(0, 36) == blockHeaderBytes.slice(0, 36), "Submitted header does not match template!");
+        // time, nbits
+    }
+
+    function checkCoinbaseTxTemplate() internal view{
+
+    }
     // allows any attacker to claim funds for their account, if k confirmations have passed since their submitted block
     // SIMPLIFY: all attackers can claim payout k bitcoin blocks after attack payout
     function claimPayout(uint256 blockHeight) public {
         require(msg.sender == _attackHeaders[blockHeight].miner, "Message sender does not match payout address for this blockheight");
         
         // TODO: CHECK IF ATTACK SUCCESSFUL OR NOT!!
-        _attackHeaders[blockHeight].miner.send((_exchangeRate * BLOCK_REWARD) + _bribe);
+        //_attackHeaders[blockHeight].miner.transfer((_exchangeRate * BLOCK_REWARD) + _bribe);
     }
 
     // HELPER FUNCTIONS
@@ -228,7 +270,7 @@ contract TXOrdering is Ownable{
     * @dev Called from submitBlockHeader. TODO: think about emitting events in this function to identify the reason for failures
     * @param hashPrevBlock Previous block hash (necessary to retrieve previous target)
     */
-    function correctDifficultyTarget(bytes32 hashPrevBlock, uint256 blockHeight, uint256 target) private view returns(bool) {
+    function correctDifficultyTarget(uint256 blockHeight, uint256 target) private view returns(bool) {
         bytes memory prevBlockHeader = _attackHeaders[blockHeight-1].header;
         uint256 prevTarget = getTargetFromHeader(prevBlockHeader);
         
@@ -316,7 +358,7 @@ contract TXOrdering is Ownable{
     */
     function withinXConfirms(uint256 blockHeight, uint256 confirmations) public view returns(bool){
         // TODO: check if attackHeader mapping actually has this blockHeight stored
-        return _attackHeaders[_attackHeight].blockHeight - blockHeight >= confirmations;
+        return _attackHeight - blockHeight >= confirmations;
     }
 
     // Parser functions
@@ -349,56 +391,81 @@ contract TXOrdering is Ownable{
     }
 
 
-    // VIEWS
-    function getBlockHeader(bytes32 blockHeaderHash) public view returns(
-        uint32 version,
-        uint32 time,
-        uint32 nonce,
-        bytes32 prevBlockHash,
-        bytes32 merkleRoot,
-        uint256 target
-    ){
-        bytes memory blockHeaderBytes = _attackHeaders[blockHeaderHash].header;
-        version = uint32(blockHeaderBytes.slice(0,4).flipBytes().bytesToUint());
-        time = uint32(blockHeaderBytes.slice(68,4).flipBytes().bytesToUint());
-        nonce = uint32(blockHeaderBytes.slice(76, 4).flipBytes().bytesToUint());
-        prevBlockHash = blockHeaderBytes.slice(4, 32).flipBytes().toBytes32();
-        merkleRoot = blockHeaderBytes.slice(36,32).toBytes32();
-        target = nBitsToTarget(blockHeaderBytes.slice(72, 4).flipBytes().bytesToUint());
-        return(version, time, nonce, prevBlockHash, merkleRoot, target);
-    }
-
-    function getLatestForkHash(uint256 forkId) public view returns(bytes32){
-        return _ongoingForks[forkId].forkHeaderHashes[_ongoingForks[forkId].forkHeaderHashes.length - 1]; 
-    }
-
-    // Returns the next block template for the attack
-    // Miners must parse/verify locally
-    function getNextBlockTemplate() public view returns (bytes memory) {
-        return getBlockTemplateForHeight(_attackHeight);
-    }
-    // Returns the block template for a given attack height 
-    // (assuming the attack template for this height has already been defined)
-    function getBlockTemplateForHeight(uint256 blockHeight) public view returns (bytes memory) {
-        // TODO: add check for existance of block height?
-        return  _headerTemplates[_attackHeight];
-    }
-
-    // Returns the next block template for the attack
-    // Miners must parse/verify locally
-    function getNextCoinbaseTxTemplate() public view returns (bytes memory) {
-        return getCoinbaseTxTemplateForHeight(_attackHeight);
-    }
-
-    // Returns the block template for a given attack height 
-    // (assuming the attack template for this height has already been defined)
-    function getCoinbaseTxTemplateForHeight(uint256 blockHeight) public view returns (bytes memory) {
-        // TODO: add check for existance of block height?
-        return  _coinbaseTxTemplates[_attackHeight];
-    }
 
     // Returns the currently funded attack duration
     function getAttackDuration() public view returns (uint256) {
-        return div(_totalFunding, _bribe + (BLOCK_REWARD * _exchangeRate));
+        return _totalFunding.div(_bribe + (BLOCK_REWARD * _exchangeRate));
     }
+
+    function extractOpReturnData(bytes memory _b) public pure returns (bytes memory) {
+        require(_b.slice(9, 1).equal(hex"6a"), "Not an OP_RETURN output");
+        bytes memory _dataLen = _b.slice(10, 1);
+        return _b.slice(11, _dataLen.bytesToUint());
+    }
+    function extractNumInputs(bytes memory _b) public pure returns (uint8) {
+        uint256 _n = extractNumInputsBytes(_b).bytesToUint();
+        require(_n < 0xfd, "VarInts not supported");  // Error on VarInts
+        return uint8(_n);
+    }
+    function extractNumOutputs(bytes memory _b) public pure returns (uint8) {
+        uint256 _offset = findNumOutputs(_b);
+        uint256 _n = _b.slice(_offset, 1).bytesToUint();
+        require(_n < 0xfd, "VarInts not supported");  // Error on VarInts
+        return uint8(_n);
+    }
+        function extractOutputAtIndex(bytes memory _b, uint8 _index) public pure returns (bytes memory) {
+
+        // Some gas wasted here. This duplicates findNumOutputs
+        require(_index < extractNumOutputs(_b), "Index more than number of outputs");
+
+        // First output is the next byte after the number of outputs
+        uint256 _offset = findNumOutputs(_b) + 1;
+
+        // Determine length of first ouput
+        uint _len = determineOutputLength(_b.slice(_offset + 8, 2));
+
+        // This loop moves forward, and then gets the len of the next one
+        for (uint i = 0; i < _index; i++) {
+            _offset = _offset + _len;
+            _len = determineOutputLength(_b.slice(_offset + 8, 2));
+        }
+
+        // We now have the length and offset of the one we want
+        return _b.slice(_offset, _len);
+    }
+    function determineOutputLength(bytes memory _b) public pure returns (uint256) {
+
+        // Keccak for equality because it doesn"t work otherwise.
+        // Wasted an hour here
+
+        // P2WSH
+        if (keccak256(_b) == keccak256(hex"2200")) { return 43; }
+
+        // P2WPKH
+        if (keccak256(_b) == keccak256(hex"1600")) { return 31; }
+
+        // Legacy P2PKH
+        if (keccak256(_b) == keccak256(hex'1976')) { return 34; }
+
+        // legacy P2SH
+        if (keccak256(_b) == keccak256(hex'17a9')) { return 32; }
+
+        // OP_RETURN
+        if (keccak256(_b.slice(1, 1)) == keccak256(hex"6a")) {
+            uint _pushLen = _b.slice(0, 1).bytesToUint();
+            require(_pushLen < 76, "Multi-byte pushes not supported");
+            // 8 byte value + 1 byte len + len bytes data
+            return 9 + _pushLen;
+        }
+
+        // Error if we fall through the if statements
+        require(false, "Unable to determine output length");
+    }
+    function findNumOutputs(bytes memory _b) public pure returns (uint256) {
+        return 7 + (41 * extractNumInputs(_b));
+    }
+    function extractNumInputsBytes(bytes memory _b) public pure returns (bytes memory) {
+        return _b.slice(6, 1);
+    }
+
 }
