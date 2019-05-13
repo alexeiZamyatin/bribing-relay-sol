@@ -10,8 +10,8 @@ module.exports = {
     development: {
       host: "localhost",
       port: 8545,
-      gas: 8000000,
-      network_id: "*" // Match any network id,
+      network_id: "*",
+      gas: 80000000 // Match any network id,
     
     },
     ropsten: {
@@ -29,11 +29,14 @@ module.exports = {
     enableTimeouts: false,
     useColors: true
   },
-  solc: {
-    version: "0.5.2",    // Fetch exact version from solc-bin (default: truffle's version)
-    optimizer: {
-      enabled: true,
-      runs: 200
+  compilers: {
+    solc: {
+      version: "0.5.2",    // Fetch exact version from solc-bin (default: truffle's version)
+      optimizer: {
+        enabled: true,
+        runs: 200
+      }
     }
   }
+  
 };

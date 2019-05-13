@@ -131,7 +131,7 @@ contract BribeRelay is Ownable{
 
         // Fail if block already exists
         // Time is always set in block header struct (prevBlockHash and height can be 0 for Genesis block)
-        require(_attackHeaders[blockHeight-1].blockHash.length <= 0, ERR_DUPLICATE_BLOCK);
+        require(_attackHeaders[blockHeight-1].lastDiffAdjustment <= 0, ERR_DUPLICATE_BLOCK);
         // Fail if previous block hash not in current state of main chain
         require(_attackHeaders[blockHeight-1].blockHash == hashPrevBlock, ERR_PREV_BLOCK);
 
@@ -157,7 +157,7 @@ contract BribeRelay is Ownable{
         _heaviestBlock = hashCurrentBlock;
         _highScore = chainWork;
         _attackHeight = blockHeight; // probably not necessary
-        require(_totalFunding > (_exchangeRate * BLOCK_REWARD) + _bribe);
+        //require(_totalFunding > (_exchangeRate * BLOCK_REWARD) + _bribe);
         _totalFunding -= (_exchangeRate * BLOCK_REWARD) + _bribe;
         _attackPayout[payoutAccount] += (_exchangeRate * BLOCK_REWARD) + _bribe;
 
@@ -168,8 +168,13 @@ contract BribeRelay is Ownable{
         }
     }
 
+    
     // EVAL CASE 3) Verify transaction inclusion
-    function verifxTX(bytes32 txid, uint256 txBlockHeight, uint256 txIndex, bytes memory merkleProof, uint256 confirmations) public returns(bool) {
+    function evalVerifyTX(bytes32 txid, uint256 txBlockHeight, uint256 txIndex, bytes memory merkleProof, uint256 confirmations) public {
+        verifxTX(txid, txBlockHeight, txIndex, merkleProof, confirmations);
+    }
+
+    function verifxTX(bytes32 txid, uint256 txBlockHeight, uint256 txIndex, bytes memory merkleProof, uint256 confirmations) public view returns(bool) {
         // txid must not be 0
         require(txid != bytes32(0x0), ERR_INVALID_TXID);
         
@@ -178,26 +183,25 @@ contract BribeRelay is Ownable{
 
         bytes32 merkleRoot = getMerkleRoot(_attackHeaders[txBlockHeight].header);
         // Check merkle proof structure: 1st hash == txid and last hash == merkleRoot
-        require(merkleProof.slice(0, 32).toBytes32() == txid, ERR_MERKLE_PROOF);
-        require(merkleProof.slice(merkleRoot.length, 32).toBytes32() == merkleRoot, ERR_MERKLE_PROOF);
+        //require(merkleProof.slice(0, 32).toBytes32() == txid, "First Merkle tree hash not txid!");
+        //require(merkleProof.slice(merkleRoot.length, 32).flipBytes().toBytes32() == merkleRoot, "Last Merkle tree hash not merkleRoot!");
         
         // compute merkle tree root and check if it matches block's original merkle tree root
-        if(computeMerkle(txid, txIndex, merkleProof) == merkleRoot){
+        if(computeMerkle(txIndex, merkleProof) == merkleRoot){
             return true;
         }
         return false;
     }
 
     // EVAL CASE 4) Parse TX
-    function parseTX(bytes memory txData) public returns(bool){
+    function parseTX(bytes memory txData) public {
         extractNumOutputs(txData);
         extractNumInputs(txData);
 
         // bytes memory input = extractInputAtIndex(txData, 0);
-        extractOutputAtIndex(txData, 0);
+        bytes memory output = extractOutputAtIndex(txData, 1);
 
-        extractOpReturnData(txData);
-        return true;
+        extractOpReturnData(output);
     }
 
 
@@ -211,25 +215,6 @@ contract BribeRelay is Ownable{
         _attackHeaders[blockHeight].blockHash = hashCurrentBlock;
         _attackHeaders[blockHeight].chainWork = chainWork;
         _attackHeaders[blockHeight].miner = payoutAccount;
-    }
-
-
-    function checkHeaderTemplate(bytes memory blockHeaderBytes, uint256 blockHeight) internal view {
-        // version, cd im 
-        //assert(_headerTemplates[blockHeight].slice(0, 36) == blockHeaderBytes.slice(0, 36), "Submitted header does not match template!");
-        // time, nbits
-    }
-
-    function checkCoinbaseTxTemplate() internal view{
-
-    }
-    // allows any attacker to claim funds for their account, if k confirmations have passed since their submitted block
-    // SIMPLIFY: all attackers can claim payout k bitcoin blocks after attack payout
-    function claimPayout(uint256 blockHeight) public {
-        require(msg.sender == _attackHeaders[blockHeight].miner, "Message sender does not match payout address for this blockheight");
-        
-        // TODO: CHECK IF ATTACK SUCCESSFUL OR NOT!!
-        //_attackHeaders[blockHeight].miner.transfer((_exchangeRate * BLOCK_REWARD) + _bribe);
     }
 
     // HELPER FUNCTIONS
@@ -319,15 +304,15 @@ contract BribeRelay is Ownable{
     * @param merkleProof merkle tree path to transaction hash from block's merkle tree root
     * @return merkle tree root of the block containing the transaction, meaningless hash otherwise
     */
-    function computeMerkle(bytes32 txHash, uint256 txIndex, bytes memory merkleProof) internal view returns(bytes32) {
+    function computeMerkle(uint256 txIndex, bytes memory merkleProof) internal view returns(bytes32) {
     
         //  Special case: only coinbase tx in block. Root == proof
         if(merkleProof.length == 32) return merkleProof.toBytes32();
 
         // Merkle proof length must be greater than 64 and power of 2. Case length == 32 covered above.
-        require(merkleProof.length > 64 && (merkleProof.length & (merkleProof.length - 1)) == 0, ERR_MERKLE_PROOF);
+        //require(merkleProof.length > 64 && (merkleProof.length & (merkleProof.length - 1)) == 0, ERR_MERKLE_PROOF);
         
-        bytes32 resultHash = txHash;
+        bytes32 resultHash;
 
         for(uint i = 1; i < merkleProof.length / 32; i++) {
             if(txIndex % 2 == 1){
@@ -350,16 +335,6 @@ contract BribeRelay is Ownable{
         return dblShaFlip(abi.encodePacked(left, right)).toBytes32();
     }
 
-    /*
-    * @notice Checks if given block hash has the requested number of confirmations
-    * @dev: Will fail in txBlockHash is not in _attackHeaders
-    * @param blockHeaderHash Block header hash to be verified
-    * @param confirmations Requested number of confirmations
-    */
-    function withinXConfirms(uint256 blockHeight, uint256 confirmations) public view returns(bool){
-        // TODO: check if attackHeader mapping actually has this blockHeight stored
-        return _attackHeight - blockHeight >= confirmations;
-    }
 
     // Parser functions
     function getTimeFromHeader(bytes memory blockHeaderBytes) public pure returns(uint32){
@@ -368,14 +343,6 @@ contract BribeRelay is Ownable{
 
     function getMerkleRoot(bytes memory blockHeaderBytes) public pure returns(bytes32){
         return blockHeaderBytes.slice(36, 32).flipBytes().toBytes32();
-    }
-
-    function getPrevBlockHashFromHeader(bytes memory blockHeaderBytes) public pure returns(bytes32){
-        return blockHeaderBytes.slice(4, 32).flipBytes().toBytes32();
-    }
-
-    function getMerkleRootFromHeader(bytes memory blockHeaderBytes) public pure returns(bytes32){
-        return blockHeaderBytes.slice(36,32).toBytes32(); 
     }
 
     function getNBitsFromHeader(bytes memory blockHeaderBytes) public pure returns(uint256){
@@ -390,12 +357,6 @@ contract BribeRelay is Ownable{
         return 0x00000000FFFF0000000000000000000000000000000000000000000000000000 / target;
     }
 
-
-
-    // Returns the currently funded attack duration
-    function getAttackDuration() public view returns (uint256) {
-        return _totalFunding.div(_bribe + (BLOCK_REWARD * _exchangeRate));
-    }
 
     function extractOpReturnData(bytes memory _b) public pure returns (bytes memory) {
         require(_b.slice(9, 1).equal(hex"6a"), "Not an OP_RETURN output");
