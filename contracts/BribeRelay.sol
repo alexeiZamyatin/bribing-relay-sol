@@ -228,6 +228,10 @@ contract BribeRelay is Ownable{
         return abi.encodePacked(sha256(abi.encodePacked(sha256(data)))).flipBytes();
     }
 
+    function dblSha(bytes memory data) public pure returns (bytes memory){
+        return abi.encodePacked(sha256(abi.encodePacked(sha256(data))));
+    }
+
     /*
     * @notice Calculates the PoW difficulty target from compressed nBits representation, 
     * according to https://bitcoin.org/en/developer-reference#target-nbits
@@ -307,20 +311,22 @@ contract BribeRelay is Ownable{
     function computeMerkle(uint256 txIndex, bytes memory merkleProof) internal view returns(bytes32) {
     
         //  Special case: only coinbase tx in block. Root == proof
-        if(merkleProof.length == 32) return merkleProof.toBytes32();
+        // if(merkleProof.length == 32) return merkleProof.toBytes32();
 
         // Merkle proof length must be greater than 64 and power of 2. Case length == 32 covered above.
         //require(merkleProof.length > 64 && (merkleProof.length & (merkleProof.length - 1)) == 0, ERR_MERKLE_PROOF);
         
         bytes32 resultHash;
 
-        for(uint i = 1; i < merkleProof.length / 32; i++) {
-            if(txIndex % 2 == 1){
-                resultHash = concatSHA256Hash(merkleProof.slice(i * 32, 32), abi.encodePacked(resultHash));
-            } else {
-                resultHash = concatSHA256Hash(abi.encodePacked(resultHash), merkleProof.slice(i * 32, 32));
-            }
-            txIndex /= 2;
+        for(uint i = 1; i < 13; i++) {
+            //if(txIndex % 2 == 1){
+            //    resultHash = concatSHA256Hash(merkleProof.slice(i * 32, 32), abi.encodePacked(resultHash));
+            //} else {
+            resultHash = concatSHA256Hash(abi.encodePacked(resultHash), merkleProof.slice(32, 32));
+            //dblShaFlip(merkleProof.slice(i * 32, 32));
+            //dblShaFlip(merkleProof.slice(i * 32, 32));
+            //}
+           // txIndex /= 2;
         }
         return resultHash;
     }
@@ -332,7 +338,7 @@ contract BribeRelay is Ownable{
     * @return sha256 hash of the concatenation of left and right
     */
     function concatSHA256Hash(bytes memory left, bytes memory right) public pure returns (bytes32) {
-        return dblShaFlip(abi.encodePacked(left, right)).toBytes32();
+        return dblSha(abi.encodePacked(left, right)).toBytes32();
     }
 
 
