@@ -23,7 +23,7 @@ npm install
 Start ganache:
 
 ```
-ganache-cli
+ganache-cli --gasLimit 800000000 --allowUnlimitedContractSize
 ```
 
 Migrate contracts:
